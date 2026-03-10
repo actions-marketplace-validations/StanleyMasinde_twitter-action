@@ -1,4 +1,4 @@
-name: Twitter Action
+name: Twitter CLI Action
 description: Install the Twitter CLI and publish a tweet from GitHub Actions
 author: Stanley Masinde
 
