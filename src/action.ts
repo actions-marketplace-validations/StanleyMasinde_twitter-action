@@ -117,21 +117,23 @@ export function renderTwitterConfig(credentials: TwitterCredentials): string {
   ].join('\n');
 }
 
-export function buildActionPaths(tempRoot: string, platform: NodeJS.Platform): ActionPaths {
+export function buildActionPaths(
+  tempRoot: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv = {},
+): ActionPaths {
   const workspaceDir = path.join(tempRoot, 'twitter-action');
   const homeDir = path.join(workspaceDir, 'home');
   const installDir = path.join(workspaceDir, 'bin');
   const fallbackBinaryPath = path.join(installDir, 'twitter');
   const binaryPath =
     platform === 'win32' ? path.join(installDir, 'twitter.exe') : fallbackBinaryPath;
+  const windowsConfigRoot = env.APPDATA ?? path.join(homeDir, 'AppData', 'Roaming');
 
-  const configPaths = Array.from(
-    new Set([
-      path.join(homeDir, '.config', 'twitter_cli', 'config.toml'),
-      path.join(homeDir, 'Library', 'Application Support', 'twitter_cli', 'config.toml'),
-      path.join(homeDir, 'AppData', 'Roaming', 'twitter_cli', 'config.toml'),
-    ]),
-  );
+  const configPaths =
+    platform === 'win32'
+        ? [path.join(windowsConfigRoot, 'twitter_cli', 'config.toml')]
+        : [path.join(homeDir, '.config', 'twitter_cli', 'config.toml')];
 
   return {
     workspaceDir,
@@ -147,11 +149,13 @@ export function buildTwitterEnvironment(
   env: NodeJS.ProcessEnv,
   homeDir: string,
 ): NodeJS.ProcessEnv {
+  const appData = env.APPDATA ?? path.join(homeDir, 'AppData', 'Roaming');
+
   return {
     ...env,
     HOME: homeDir,
     USERPROFILE: homeDir,
-    APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
+    APPDATA: appData,
     XDG_CONFIG_HOME: path.join(homeDir, '.config'),
   };
 }
@@ -328,7 +332,7 @@ export async function runAction(services: ActionServices = createServices()): Pr
   const inputs = parseInputs(services.getInput);
   registerSecrets(services.setSecret, inputs.credentials);
 
-  const paths = buildActionPaths(services.tempRoot, services.platform);
+  const paths = buildActionPaths(services.tempRoot, services.platform, services.env);
   await services.mkdir(paths.workspaceDir);
 
   await installTwitter(services, inputs.twitterVersion, paths.installDir, services.env);

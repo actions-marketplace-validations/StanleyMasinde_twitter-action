@@ -28939,17 +28939,16 @@ function renderTwitterConfig(credentials) {
         '',
     ].join('\n');
 }
-function buildActionPaths(tempRoot, platform) {
+function buildActionPaths(tempRoot, platform, env = {}) {
     const workspaceDir = path$1.join(tempRoot, 'twitter-action');
     const homeDir = path$1.join(workspaceDir, 'home');
     const installDir = path$1.join(workspaceDir, 'bin');
     const fallbackBinaryPath = path$1.join(installDir, 'twitter');
     const binaryPath = platform === 'win32' ? path$1.join(installDir, 'twitter.exe') : fallbackBinaryPath;
-    const configPaths = Array.from(new Set([
-        path$1.join(homeDir, '.config', 'twitter_cli', 'config.toml'),
-        path$1.join(homeDir, 'Library', 'Application Support', 'twitter_cli', 'config.toml'),
-        path$1.join(homeDir, 'AppData', 'Roaming', 'twitter_cli', 'config.toml'),
-    ]));
+    const windowsConfigRoot = env.APPDATA ?? path$1.join(homeDir, 'AppData', 'Roaming');
+    const configPaths = platform === 'win32'
+        ? [path$1.join(windowsConfigRoot, 'twitter_cli', 'config.toml')]
+        : [path$1.join(homeDir, '.config', 'twitter_cli', 'config.toml')];
     return {
         workspaceDir,
         homeDir,
@@ -28960,11 +28959,12 @@ function buildActionPaths(tempRoot, platform) {
     };
 }
 function buildTwitterEnvironment(env, homeDir) {
+    const appData = env.APPDATA ?? path$1.join(homeDir, 'AppData', 'Roaming');
     return {
         ...env,
         HOME: homeDir,
         USERPROFILE: homeDir,
-        APPDATA: path$1.join(homeDir, 'AppData', 'Roaming'),
+        APPDATA: appData,
         XDG_CONFIG_HOME: path$1.join(homeDir, '.config'),
     };
 }
@@ -29094,7 +29094,7 @@ async function tweet(services, binaryPath, body, environment) {
 async function runAction(services = createServices()) {
     const inputs = parseInputs(services.getInput);
     registerSecrets(services.setSecret, inputs.credentials);
-    const paths = buildActionPaths(services.tempRoot, services.platform);
+    const paths = buildActionPaths(services.tempRoot, services.platform, services.env);
     await services.mkdir(paths.workspaceDir);
     await installTwitter(services, inputs.twitterVersion, paths.installDir, services.env);
     services.addPath(paths.installDir);

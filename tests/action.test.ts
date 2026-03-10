@@ -159,6 +159,43 @@ describe('buildTwitterEnvironment', () => {
     expect(environment.HOME).toBe('/tmp/runner/twitter-action/home');
     expect(environment.APPDATA).toBe('/tmp/runner/twitter-action/home/AppData/Roaming');
   });
+
+  it('preserves APPDATA when it is already provided', () => {
+    const environment = buildTwitterEnvironment(
+      { APPDATA: 'C:\\Users\\runneradmin\\AppData\\Roaming' },
+      'C:\\temp\\twitter-action\\home',
+    );
+
+    expect(environment.APPDATA).toBe('C:\\Users\\runneradmin\\AppData\\Roaming');
+  });
+});
+
+describe('buildActionPaths', () => {
+  it('uses the linux xdg config path for the twitter cli config', () => {
+    const paths = buildActionPaths('/tmp/runner', 'linux');
+
+    expect(paths.configPaths).toEqual([
+      '/tmp/runner/twitter-action/home/.config/twitter_cli/config.toml',
+    ]);
+  });
+
+  it('uses the same xdg config path on darwin', () => {
+    const paths = buildActionPaths('/tmp/runner', 'darwin');
+
+    expect(paths.configPaths).toEqual([
+      '/tmp/runner/twitter-action/home/.config/twitter_cli/config.toml',
+    ]);
+  });
+
+  it('uses APPDATA on windows for the twitter cli config', () => {
+    const paths = buildActionPaths('C:\\temp', 'win32', {
+      APPDATA: 'C:\\Users\\runneradmin\\AppData\\Roaming',
+    });
+
+    expect(paths.configPaths).toEqual([
+      path.join('C:\\Users\\runneradmin\\AppData\\Roaming', 'twitter_cli', 'config.toml'),
+    ]);
+  });
 });
 
 describe('runAction', () => {
@@ -193,18 +230,28 @@ describe('runAction', () => {
       command: paths.binaryPath,
       args: ['tweet', '--body', 'Ship it'],
     });
-    expect(
-      services.writes.some(({ filePath }) => filePath.endsWith('twitter_cli/config.toml')),
-    ).toBe(true);
+    expect(services.writes).toContainEqual({
+      filePath: '/tmp/runner/twitter-action/home/.config/twitter_cli/config.toml',
+      content: renderTwitterConfig({
+        consumerKey: 'consumer-key',
+        consumerSecret: 'consumer-secret',
+        accessToken: 'access-token',
+        accessSecret: 'access-secret',
+        bearerToken: 'bearer-token',
+      }),
+    });
   });
 
   it('creates a windows executable alias when the installer leaves only a bare binary', async () => {
-    const paths = buildActionPaths('C:\\temp', 'win32');
+    const paths = buildActionPaths('C:\\temp', 'win32', {
+      APPDATA: 'C:\\Users\\runneradmin\\AppData\\Roaming',
+    });
     const services = createMockServices({
       platform: 'win32',
       tempRoot: 'C:\\temp',
       env: {
         Path: 'C:\\Windows\\System32',
+        APPDATA: 'C:\\Users\\runneradmin\\AppData\\Roaming',
       },
       fileExists: vi.fn(async (filePath: string) => filePath === path.join(paths.installDir, 'twitter')),
     });
@@ -218,6 +265,16 @@ describe('runAction', () => {
     expect(services.copies).toContainEqual({
       fromPath: path.join(paths.installDir, 'twitter'),
       toPath: path.join(paths.installDir, 'twitter.exe'),
+    });
+    expect(services.writes).toContainEqual({
+      filePath: path.join('C:\\Users\\runneradmin\\AppData\\Roaming', 'twitter_cli', 'config.toml'),
+      content: renderTwitterConfig({
+        consumerKey: 'consumer-key',
+        consumerSecret: 'consumer-secret',
+        accessToken: 'access-token',
+        accessSecret: 'access-secret',
+        bearerToken: 'bearer-token',
+      }),
     });
     expect(services.addPathCalls).toEqual([paths.installDir]);
     expect(services.execCalls[1]?.command).toBe(path.join(paths.installDir, 'twitter.exe'));
