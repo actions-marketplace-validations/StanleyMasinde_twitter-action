@@ -64,6 +64,7 @@ jobs:
 - The CLI is installed into a runner-local directory under `RUNNER_TEMP`, not into a system path.
 - Credentials are written to a temporary config file for the duration of the job.
 - This action currently supports text tweets only. The underlying CLI supports images, but this action does not expose an `image` input yet.
+- The runtime implementation uses the GitHub Actions toolkit packages, including `@actions/core` and `@actions/exec`.
 
 ## Development
 
@@ -75,7 +76,7 @@ pnpm test
 pnpm build
 ```
 
-`pnpm` should be treated as a development dependency for this repository, not as a runtime requirement for action consumers. GitHub runs the compiled JavaScript from [`dist/index.js`](dist/index.js).
+`pnpm` should be treated as a development dependency for this repository, not as a runtime requirement for action consumers. `pnpm build` type-checks the action and packages a distribution-ready [`dist/index.js`](dist/index.js) with Rollup.
 
 ## CI
 

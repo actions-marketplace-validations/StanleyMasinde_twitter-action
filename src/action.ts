@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import * as core from '@actions/core';
+import { getExecOutput } from '@actions/exec';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -29,10 +30,14 @@ export interface ActionPaths {
   fallbackBinaryPath: string;
 }
 
+export interface InputOptions {
+  required?: boolean;
+  trimWhitespace?: boolean;
+}
+
 export interface CommandOptions {
-  cwd?: string;
   env?: NodeJS.ProcessEnv;
-  input?: string;
+  input?: string | Buffer;
 }
 
 export interface CommandResult {
@@ -41,56 +46,53 @@ export interface CommandResult {
   exitCode: number;
 }
 
-export interface ActionRuntime {
+export interface ActionServices {
   env: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
   tempRoot: string;
-  fetchText(url: string): Promise<string>;
+  getInput(name: string, options?: InputOptions): string;
+  setSecret(secret: string): void;
+  addPath(inputPath: string): void;
+  info(message: string): void;
+  warning(message: string): void;
   exec(command: string, args: string[], options?: CommandOptions): Promise<CommandResult>;
+  fetchText(url: string): Promise<string>;
   mkdir(dirPath: string): Promise<void>;
   writeFile(filePath: string, content: string): Promise<void>;
-  appendFile(filePath: string, content: string): Promise<void>;
   copyFile(fromPath: string, toPath: string): Promise<void>;
   fileExists(filePath: string): Promise<boolean>;
-  log(message: string): void;
-  error(message: string): void;
 }
 
-function envKey(name: string): string {
-  return `INPUT_${name.toUpperCase()}`;
-}
-
-function getRequiredInput(env: NodeJS.ProcessEnv, name: string): string {
-  const value = env[envKey(name)];
-  if (!value || value.trim().length === 0) {
-    throw new Error(`Missing required input: ${name}`);
-  }
-
-  return value;
-}
-
-function getOptionalInput(env: NodeJS.ProcessEnv, name: string): string | undefined {
-  const value = env[envKey(name)];
-  return value && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-export function parseInputs(env: NodeJS.ProcessEnv): ActionInputs {
-  const body = getRequiredInput(env, 'body');
+export function parseInputs(
+  getInput: ActionServices['getInput'],
+): ActionInputs {
+  const body = getInput('body', { required: true, trimWhitespace: false });
   if (body.trim().length === 0) {
     throw new Error('Input "body" must not be empty.');
   }
 
   return {
     body,
-    twitterVersion: getOptionalInput(env, 'twitter_version') ?? 'latest',
+    twitterVersion: getInput('twitter_version') || 'latest',
     credentials: {
-      consumerKey: getRequiredInput(env, 'consumer_key').trim(),
-      consumerSecret: getRequiredInput(env, 'consumer_secret').trim(),
-      accessToken: getRequiredInput(env, 'access_token').trim(),
-      accessSecret: getRequiredInput(env, 'access_secret').trim(),
-      bearerToken: getRequiredInput(env, 'bearer_token').trim(),
+      consumerKey: getInput('consumer_key', { required: true }),
+      consumerSecret: getInput('consumer_secret', { required: true }),
+      accessToken: getInput('access_token', { required: true }),
+      accessSecret: getInput('access_secret', { required: true }),
+      bearerToken: getInput('bearer_token', { required: true }),
     },
   };
+}
+
+export function registerSecrets(
+  setSecret: ActionServices['setSecret'],
+  credentials: TwitterCredentials,
+): void {
+  setSecret(credentials.consumerKey);
+  setSecret(credentials.consumerSecret);
+  setSecret(credentials.accessToken);
+  setSecret(credentials.accessSecret);
+  setSecret(credentials.bearerToken);
 }
 
 function escapeTomlString(value: string): string {
@@ -143,44 +145,27 @@ export function buildActionPaths(tempRoot: string, platform: NodeJS.Platform): A
 
 export function buildTwitterEnvironment(
   env: NodeJS.ProcessEnv,
-  installDir: string,
   homeDir: string,
 ): NodeJS.ProcessEnv {
-  const appDataDir = path.join(homeDir, 'AppData', 'Roaming');
-  const xdgConfigDir = path.join(homeDir, '.config');
-  const existingPath = env.PATH ?? '';
-  const nextPath = existingPath ? `${installDir}${path.delimiter}${existingPath}` : installDir;
-
   return {
     ...env,
-    PATH: nextPath,
     HOME: homeDir,
     USERPROFILE: homeDir,
-    APPDATA: appDataDir,
-    XDG_CONFIG_HOME: xdgConfigDir,
+    APPDATA: path.join(homeDir, 'AppData', 'Roaming'),
+    XDG_CONFIG_HOME: path.join(homeDir, '.config'),
   };
 }
 
 export async function writeTwitterConfig(
-  runtime: ActionRuntime,
+  services: Pick<ActionServices, 'mkdir' | 'writeFile'>,
   configPaths: string[],
   credentials: TwitterCredentials,
 ): Promise<void> {
   const content = renderTwitterConfig(credentials);
 
   for (const configPath of configPaths) {
-    await runtime.mkdir(path.dirname(configPath));
-    await runtime.writeFile(configPath, content);
-  }
-}
-
-async function appendPath(runtime: ActionRuntime, installDir: string): Promise<void> {
-  runtime.env.PATH = runtime.env.PATH
-    ? `${installDir}${path.delimiter}${runtime.env.PATH}`
-    : installDir;
-
-  if (runtime.env.GITHUB_PATH) {
-    await runtime.appendFile(runtime.env.GITHUB_PATH, `${installDir}${os.EOL}`);
+    await services.mkdir(path.dirname(configPath));
+    await services.writeFile(configPath, content);
   }
 }
 
@@ -202,11 +187,74 @@ function formatCommandError(
   return lines.join('\n\n');
 }
 
-export function createRuntime(): ActionRuntime {
+function toExecEnvironment(
+  env: NodeJS.ProcessEnv | undefined,
+): { [key: string]: string } | undefined {
+  if (!env) {
+    return undefined;
+  }
+
+  const nextEnv: { [key: string]: string } = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) {
+      nextEnv[key] = value;
+    }
+  }
+
+  return nextEnv;
+}
+
+function toExecInput(input: string | Buffer | undefined): Buffer | undefined {
+  if (input === undefined) {
+    return undefined;
+  }
+
+  return typeof input === 'string' ? Buffer.from(input) : input;
+}
+
+export async function runCommand(
+  services: Pick<ActionServices, 'exec' | 'info' | 'warning'>,
+  command: string,
+  args: string[],
+  options: CommandOptions = {},
+): Promise<void> {
+  const result = await services.exec(command, args, options);
+
+  if (result.stdout.trim()) {
+    services.info(result.stdout.trimEnd());
+  }
+  if (result.stderr.trim()) {
+    services.warning(result.stderr.trimEnd());
+  }
+  if (result.exitCode !== 0) {
+    throw new Error(formatCommandError(command, args, result.exitCode, result.stdout, result.stderr));
+  }
+}
+
+export function createServices(): ActionServices {
   return {
     env: process.env,
     platform: process.platform,
     tempRoot: process.env.RUNNER_TEMP ?? os.tmpdir(),
+    getInput: core.getInput,
+    setSecret: core.setSecret,
+    addPath: core.addPath,
+    info: core.info,
+    warning: core.warning,
+    async exec(command: string, args: string[], options: CommandOptions = {}): Promise<CommandResult> {
+      const result = await getExecOutput(command, args, {
+        env: toExecEnvironment(options.env),
+        input: toExecInput(options.input),
+        ignoreReturnCode: true,
+        silent: true,
+      });
+
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+      };
+    },
     async fetchText(url: string): Promise<string> {
       const response = await fetch(url);
       if (!response.ok) {
@@ -215,53 +263,11 @@ export function createRuntime(): ActionRuntime {
 
       return response.text();
     },
-    exec(command: string, args: string[], options: CommandOptions = {}): Promise<CommandResult> {
-      return new Promise<CommandResult>((resolve, reject) => {
-        const child = spawn(command, args, {
-          cwd: options.cwd,
-          env: options.env,
-          stdio: 'pipe',
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        child.stdout.on('data', (chunk: Buffer | string) => {
-          stdout += chunk.toString();
-        });
-
-        child.stderr.on('data', (chunk: Buffer | string) => {
-          stderr += chunk.toString();
-        });
-
-        child.on('error', (error) => {
-          reject(error);
-        });
-
-        child.on('close', (code) => {
-          const exitCode = code ?? 1;
-          if (exitCode !== 0) {
-            reject(new Error(formatCommandError(command, args, exitCode, stdout, stderr)));
-            return;
-          }
-
-          resolve({ stdout, stderr, exitCode });
-        });
-
-        if (options.input) {
-          child.stdin.write(options.input);
-        }
-        child.stdin.end();
-      });
-    },
     async mkdir(dirPath: string): Promise<void> {
       await fs.mkdir(dirPath, { recursive: true });
     },
     async writeFile(filePath: string, content: string): Promise<void> {
       await fs.writeFile(filePath, content, 'utf8');
-    },
-    async appendFile(filePath: string, content: string): Promise<void> {
-      await fs.appendFile(filePath, content, 'utf8');
     },
     async copyFile(fromPath: string, toPath: string): Promise<void> {
       await fs.copyFile(fromPath, toPath);
@@ -274,79 +280,61 @@ export function createRuntime(): ActionRuntime {
         return false;
       }
     },
-    log(message: string): void {
-      console.log(message);
-    },
-    error(message: string): void {
-      console.error(message);
-    },
   };
 }
 
 export async function installTwitter(
-  runtime: ActionRuntime,
+  services: Pick<ActionServices, 'mkdir' | 'fetchText' | 'exec' | 'info' | 'warning' | 'copyFile' | 'fileExists' | 'platform'>,
   version: string,
   installDir: string,
   environment: NodeJS.ProcessEnv,
 ): Promise<void> {
-  await runtime.mkdir(installDir);
-  const installerScript = await runtime.fetchText(INSTALLER_URL);
+  await services.mkdir(installDir);
+  const installerScript = await services.fetchText(INSTALLER_URL);
   const installerArgs = version === 'latest' ? ['-s'] : ['-s', version];
-  const result = await runtime.exec('bash', installerArgs, {
+
+  await runCommand(services, 'bash', installerArgs, {
     env: {
       ...environment,
       TWITTER_INSTALL: installDir,
     },
-    input: installerScript,
+    input: Buffer.from(installerScript),
   });
 
-  if (result.stdout.trim()) {
-    runtime.log(result.stdout.trimEnd());
-  }
-  if (result.stderr.trim()) {
-    runtime.error(result.stderr.trimEnd());
-  }
-
-  if (runtime.platform === 'win32') {
+  if (services.platform === 'win32') {
     const bareBinaryPath = path.join(installDir, 'twitter');
     const executablePath = path.join(installDir, 'twitter.exe');
-    const hasBareBinary = await runtime.fileExists(bareBinaryPath);
-    const hasExecutableBinary = await runtime.fileExists(executablePath);
+    const hasBareBinary = await services.fileExists(bareBinaryPath);
+    const hasExecutableBinary = await services.fileExists(executablePath);
 
     if (hasBareBinary && !hasExecutableBinary) {
-      await runtime.copyFile(bareBinaryPath, executablePath);
+      await services.copyFile(bareBinaryPath, executablePath);
     }
   }
 }
 
 export async function tweet(
-  runtime: ActionRuntime,
+  services: Pick<ActionServices, 'exec' | 'info' | 'warning'>,
   binaryPath: string,
   body: string,
   environment: NodeJS.ProcessEnv,
 ): Promise<void> {
-  const result = await runtime.exec(binaryPath, ['tweet', '--body', body], {
+  await runCommand(services, binaryPath, ['tweet', '--body', body], {
     env: environment,
   });
-
-  if (result.stdout.trim()) {
-    runtime.log(result.stdout.trimEnd());
-  }
-  if (result.stderr.trim()) {
-    runtime.error(result.stderr.trimEnd());
-  }
 }
 
-export async function runAction(runtime: ActionRuntime = createRuntime()): Promise<void> {
-  const inputs = parseInputs(runtime.env);
-  const paths = buildActionPaths(runtime.tempRoot, runtime.platform);
+export async function runAction(services: ActionServices = createServices()): Promise<void> {
+  const inputs = parseInputs(services.getInput);
+  registerSecrets(services.setSecret, inputs.credentials);
 
-  await runtime.mkdir(paths.workspaceDir);
+  const paths = buildActionPaths(services.tempRoot, services.platform);
+  await services.mkdir(paths.workspaceDir);
 
-  const twitterEnvironment = buildTwitterEnvironment(runtime.env, paths.installDir, paths.homeDir);
+  await installTwitter(services, inputs.twitterVersion, paths.installDir, services.env);
+  services.addPath(paths.installDir);
 
-  await installTwitter(runtime, inputs.twitterVersion, paths.installDir, twitterEnvironment);
-  await appendPath(runtime, paths.installDir);
-  await writeTwitterConfig(runtime, paths.configPaths, inputs.credentials);
-  await tweet(runtime, paths.binaryPath, inputs.body, twitterEnvironment);
+  const twitterEnvironment = buildTwitterEnvironment(services.env, paths.homeDir);
+  await writeTwitterConfig(services, paths.configPaths, inputs.credentials);
+  await tweet(services, paths.binaryPath, inputs.body, twitterEnvironment);
 }

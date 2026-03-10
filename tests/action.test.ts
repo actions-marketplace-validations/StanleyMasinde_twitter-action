@@ -6,91 +6,129 @@ import {
   buildTwitterEnvironment,
   INSTALLER_URL,
   parseInputs,
+  registerSecrets,
   renderTwitterConfig,
   runAction,
-  type ActionRuntime,
+  type ActionServices,
   type CommandOptions,
   type CommandResult,
+  type InputOptions,
 } from '../src/action.js';
 
-function createMockRuntime(
-  overrides: Partial<ActionRuntime> = {},
-): ActionRuntime & {
+function createMockServices(
+  overrides: Partial<ActionServices> = {},
+): ActionServices & {
+  addPathCalls: string[];
   execCalls: Array<{ command: string; args: string[]; options?: CommandOptions }>;
   writes: Array<{ filePath: string; content: string }>;
-  appends: Array<{ filePath: string; content: string }>;
   copies: Array<{ fromPath: string; toPath: string }>;
+  registeredSecrets: string[];
 } {
+  const addPathCalls: string[] = [];
   const execCalls: Array<{ command: string; args: string[]; options?: CommandOptions }> = [];
   const writes: Array<{ filePath: string; content: string }> = [];
-  const appends: Array<{ filePath: string; content: string }> = [];
   const copies: Array<{ fromPath: string; toPath: string }> = [];
+  const registeredSecrets: string[] = [];
 
-  const runtime: ActionRuntime = {
+  const inputs = {
+    body: 'Ship it',
+    twitter_version: 'latest',
+    consumer_key: 'consumer-key',
+    consumer_secret: 'consumer-secret',
+    access_token: 'access-token',
+    access_secret: 'access-secret',
+    bearer_token: 'bearer-token',
+  };
+
+  const services: ActionServices = {
     env: {
-      INPUT_BODY: 'Ship it',
-      INPUT_TWITTER_VERSION: 'latest',
-      INPUT_CONSUMER_KEY: 'consumer-key',
-      INPUT_CONSUMER_SECRET: 'consumer-secret',
-      INPUT_ACCESS_TOKEN: 'access-token',
-      INPUT_ACCESS_SECRET: 'access-secret',
-      INPUT_BEARER_TOKEN: 'bearer-token',
       GITHUB_PATH: '/tmp/github-path',
       PATH: '/usr/bin',
     },
     platform: 'linux',
     tempRoot: '/tmp/runner',
-    fetchText: vi.fn(async () => '#!/usr/bin/env sh\n'),
+    getInput: vi.fn((name: string, options?: InputOptions) => {
+      const value = inputs[name as keyof typeof inputs] ?? '';
+      if (options?.required && !value) {
+        throw new Error(`Input required and not supplied: ${name}`);
+      }
+      return value;
+    }),
+    setSecret: vi.fn((secret: string) => {
+      registeredSecrets.push(secret);
+    }),
+    addPath: vi.fn((inputPath: string) => {
+      addPathCalls.push(inputPath);
+    }),
+    info: vi.fn(),
+    warning: vi.fn(),
     exec: vi.fn(async (command: string, args: string[], options?: CommandOptions) => {
       execCalls.push({ command, args, options });
       return { stdout: '', stderr: '', exitCode: 0 };
     }),
+    fetchText: vi.fn(async () => '#!/usr/bin/env sh\n'),
     mkdir: vi.fn(async () => undefined),
     writeFile: vi.fn(async (filePath: string, content: string) => {
       writes.push({ filePath, content });
-    }),
-    appendFile: vi.fn(async (filePath: string, content: string) => {
-      appends.push({ filePath, content });
     }),
     copyFile: vi.fn(async (fromPath: string, toPath: string) => {
       copies.push({ fromPath, toPath });
     }),
     fileExists: vi.fn(async () => false),
-    log: vi.fn(),
-    error: vi.fn(),
     ...overrides,
   };
 
-  return Object.assign(runtime, {
+  return Object.assign(services, {
+    addPathCalls,
     execCalls,
     writes,
-    appends,
     copies,
+    registeredSecrets,
   });
 }
 
 describe('parseInputs', () => {
   it('reads required action inputs', () => {
-    const inputs = parseInputs({
-      INPUT_BODY: 'hello world',
-      INPUT_CONSUMER_KEY: 'consumer-key',
-      INPUT_CONSUMER_SECRET: 'consumer-secret',
-      INPUT_ACCESS_TOKEN: 'access-token',
-      INPUT_ACCESS_SECRET: 'access-secret',
-      INPUT_BEARER_TOKEN: 'bearer-token',
+    const getInput = vi.fn((name: string) => {
+      const inputs: Record<string, string> = {
+        body: 'hello world',
+        consumer_key: 'consumer-key',
+        consumer_secret: 'consumer-secret',
+        access_token: 'access-token',
+        access_secret: 'access-secret',
+        bearer_token: 'bearer-token',
+      };
+
+      return inputs[name] ?? '';
     });
+
+    const inputs = parseInputs(getInput);
 
     expect(inputs.twitterVersion).toBe('latest');
     expect(inputs.body).toBe('hello world');
     expect(inputs.credentials.consumerKey).toBe('consumer-key');
   });
 
-  it('fails when a required input is missing', () => {
+  it('fails when the body is blank', () => {
     expect(() =>
-      parseInputs({
-        INPUT_BODY: 'hello world',
-      }),
-    ).toThrow('Missing required input: consumer_key');
+      parseInputs((name: string) => (name === 'body' ? '   ' : 'token')),
+    ).toThrow('Input "body" must not be empty.');
+  });
+});
+
+describe('registerSecrets', () => {
+  it('masks every twitter credential', () => {
+    const setSecret = vi.fn();
+
+    registerSecrets(setSecret, {
+      consumerKey: 'consumer-key',
+      consumerSecret: 'consumer-secret',
+      accessToken: 'access-token',
+      accessSecret: 'access-secret',
+      bearerToken: 'bearer-token',
+    });
+
+    expect(setSecret).toHaveBeenCalledTimes(5);
   });
 });
 
@@ -111,24 +149,23 @@ describe('renderTwitterConfig', () => {
 });
 
 describe('buildTwitterEnvironment', () => {
-  it('injects install and config locations into the environment', () => {
+  it('injects config locations into the environment', () => {
     const environment = buildTwitterEnvironment(
       { PATH: '/usr/bin' },
-      '/tmp/runner/twitter-action/bin',
       '/tmp/runner/twitter-action/home',
     );
 
-    expect(environment.PATH).toBe('/tmp/runner/twitter-action/bin:/usr/bin');
+    expect(environment.PATH).toBe('/usr/bin');
     expect(environment.HOME).toBe('/tmp/runner/twitter-action/home');
     expect(environment.APPDATA).toBe('/tmp/runner/twitter-action/home/AppData/Roaming');
   });
 });
 
 describe('runAction', () => {
-  it('installs the CLI, writes config files, and sends the tweet', async () => {
-    const runtime = createMockRuntime();
-    runtime.exec = vi.fn(async (command: string, args: string[], options?: CommandOptions) => {
-      runtime.execCalls.push({ command, args, options });
+  it('installs the CLI, masks secrets, writes config, and sends the tweet', async () => {
+    const services = createMockServices();
+    services.exec = vi.fn(async (command: string, args: string[], options?: CommandOptions) => {
+      services.execCalls.push({ command, args, options });
       const result: CommandResult =
         command === 'bash'
           ? { stdout: 'installed', stderr: '', exitCode: 0 }
@@ -136,54 +173,53 @@ describe('runAction', () => {
       return result;
     });
 
-    await runAction(runtime);
+    await runAction(services);
 
     const paths = buildActionPaths('/tmp/runner', 'linux');
-    expect(runtime.fetchText).toHaveBeenCalledWith(INSTALLER_URL);
-    expect(runtime.execCalls[0]).toMatchObject({
+    expect(services.fetchText).toHaveBeenCalledWith(INSTALLER_URL);
+    expect(services.registeredSecrets).toEqual([
+      'consumer-key',
+      'consumer-secret',
+      'access-token',
+      'access-secret',
+      'bearer-token',
+    ]);
+    expect(services.addPathCalls).toEqual([paths.installDir]);
+    expect(services.execCalls[0]).toMatchObject({
       command: 'bash',
       args: ['-s'],
     });
-    expect(runtime.execCalls[1]).toMatchObject({
+    expect(services.execCalls[1]).toMatchObject({
       command: paths.binaryPath,
       args: ['tweet', '--body', 'Ship it'],
     });
-    expect(runtime.appends).toContainEqual({
-      filePath: '/tmp/github-path',
-      content: `${paths.installDir}\n`,
-    });
-    expect(runtime.writes.some(({ filePath }) => filePath.endsWith('twitter_cli/config.toml'))).toBe(
-      true,
-    );
+    expect(
+      services.writes.some(({ filePath }) => filePath.endsWith('twitter_cli/config.toml')),
+    ).toBe(true);
   });
 
   it('creates a windows executable alias when the installer leaves only a bare binary', async () => {
     const paths = buildActionPaths('C:\\temp', 'win32');
-    const runtime = createMockRuntime({
+    const services = createMockServices({
       platform: 'win32',
       tempRoot: 'C:\\temp',
       env: {
-        INPUT_BODY: 'Ship it',
-        INPUT_CONSUMER_KEY: 'consumer-key',
-        INPUT_CONSUMER_SECRET: 'consumer-secret',
-        INPUT_ACCESS_TOKEN: 'access-token',
-        INPUT_ACCESS_SECRET: 'access-secret',
-        INPUT_BEARER_TOKEN: 'bearer-token',
-        PATH: 'C:\\Windows\\System32',
+        Path: 'C:\\Windows\\System32',
       },
       fileExists: vi.fn(async (filePath: string) => filePath === path.join(paths.installDir, 'twitter')),
     });
-    runtime.exec = vi.fn(async (command: string, args: string[], options?: CommandOptions) => {
-      runtime.execCalls.push({ command, args, options });
+    services.exec = vi.fn(async (command: string, args: string[], options?: CommandOptions) => {
+      services.execCalls.push({ command, args, options });
       return { stdout: '', stderr: '', exitCode: 0 };
     });
 
-    await runAction(runtime);
+    await runAction(services);
 
-    expect(runtime.copies).toContainEqual({
+    expect(services.copies).toContainEqual({
       fromPath: path.join(paths.installDir, 'twitter'),
       toPath: path.join(paths.installDir, 'twitter.exe'),
     });
-    expect(runtime.execCalls[1]?.command).toBe(path.join(paths.installDir, 'twitter.exe'));
+    expect(services.addPathCalls).toEqual([paths.installDir]);
+    expect(services.execCalls[1]?.command).toBe(path.join(paths.installDir, 'twitter.exe'));
   });
 });
