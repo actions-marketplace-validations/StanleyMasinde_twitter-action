@@ -1,10 +1,10 @@
-name: Twitter CLI
+name: Twitter Action
 description: Install the Twitter CLI and publish a tweet from GitHub Actions
 author: Stanley Masinde
 
 branding:
-  icon: heart
-  color: red
+  icon: at-sign
+  color: blue
 
 inputs:
   body:
