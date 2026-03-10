@@ -1,0 +1,35 @@
+name: Twitter CLI
+description: Install the Twitter CLI and publish a tweet from GitHub Actions
+author: Stanley Masinde
+
+branding:
+  icon: heart
+  color: red
+
+inputs:
+  body:
+    description: Tweet body to publish
+    required: true
+  twitter_version:
+    description: Twitter CLI version tag to install, for example v1.5.0
+    required: false
+    default: latest
+  consumer_key:
+    description: Twitter API consumer key
+    required: true
+  consumer_secret:
+    description: Twitter API consumer secret
+    required: true
+  access_token:
+    description: Twitter API access token
+    required: true
+  access_secret:
+    description: Twitter API access token secret
+    required: true
+  bearer_token:
+    description: Twitter API bearer token
+    required: true
+
+runs:
+  using: node24
+  main: dist/index.js
